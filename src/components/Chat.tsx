@@ -92,11 +92,27 @@ export const Chat = () => {
                 return;
             }
 
-            // Sync and find/create DM
+            // Sync conversations
             await client.conversations.sync();
-            let conv = await client.conversations.fetchDmByIdentifier(identifier);
+
+            // Create a unique group name for this domain pair (sorted for consistency)
+            const domainPair = [selectedDomain, recipientDomain].sort().join(':');
+            const groupName = `doma:${domainPair}`;
+
+            // Check if a group with this domain pair already exists
+            const allConversations = await client.conversations.list();
+            // Filter for groups only (DMs don't have names) and find by group name
+            let conv = allConversations.find(c => 'name' in c && c.name === groupName);
+
             if (!conv) {
-                conv = await client.conversations.createDmWithIdentifier(identifier);
+                // Create a new group for this domain pair
+                console.log('Creating new group for domain pair:', groupName);
+                conv = await client.conversations.createGroupWithIdentifiers([identifier], {
+                    groupName: groupName,
+                    groupDescription: `Chat between ${selectedDomain} and ${recipientDomain}`,
+                });
+            } else {
+                console.log('Found existing group for domain pair:', groupName);
             }
 
             // Sync to backend
@@ -205,8 +221,8 @@ export const Chat = () => {
                             value={recipientDomain}
                             onChange={(e) => setRecipientDomain(e.target.value)}
                             className={`flex-1 bg-gray-700 text-white px-3 py-2 rounded-lg text-sm focus:outline-none focus:ring-2 ${recipientStatus === 'valid' ? 'focus:ring-green-500 ring-1 ring-green-500/50' :
-                                    recipientStatus === 'invalid' ? 'focus:ring-red-500 ring-1 ring-red-500/50' :
-                                        'focus:ring-blue-500'
+                                recipientStatus === 'invalid' ? 'focus:ring-red-500 ring-1 ring-red-500/50' :
+                                    'focus:ring-blue-500'
                                 }`}
                         />
                     </div>

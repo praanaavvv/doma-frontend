@@ -4,6 +4,7 @@ import { useDomains } from '../hooks/useDomains';
 import { useAccount } from 'wagmi';
 import { DecodedMessage, IdentifierKind } from '@xmtp/browser-sdk';
 import { getOwnerByDomain, syncConversation } from '../api/domaApi';
+import { isDomainOnboarded, onboardDomain } from '../api/messagingApi';
 
 export const Chat = () => {
     const { address } = useAccount();
@@ -16,7 +17,71 @@ export const Chat = () => {
     const [conversation, setConversation] = useState<any>(null);
     const [isStartingChat, setIsStartingChat] = useState(false);
     const [recipientStatus, setRecipientStatus] = useState<'idle' | 'checking' | 'valid' | 'invalid'>('idle');
+    const [onboardingStatus, setOnboardingStatus] = useState<{
+        isOnboarding: boolean;
+        currentDomain: string | null;
+        completedDomains: string[];
+        failedDomains: string[];
+    }>({ isOnboarding: false, currentDomain: null, completedDomains: [], failedDomains: [] });
     const streamRef = useRef<any>(null);
+
+    // Auto-onboard domains after XMTP connects
+    useEffect(() => {
+        console.log('Onboarding effect check:', { isConnected, address, domainsLength: domains.length });
+
+        if (!isConnected || !address || domains.length === 0) {
+            console.log('Onboarding skipped - conditions not met');
+            return;
+        }
+
+        console.log('Starting auto-onboarding for domains:', domains.map(d => d.domain));
+
+        const onboardDomains = async () => {
+            setOnboardingStatus(prev => ({ ...prev, isOnboarding: true }));
+
+            for (const domainInfo of domains) {
+                const domain = domainInfo.domain;
+                setOnboardingStatus(prev => ({ ...prev, currentDomain: domain }));
+
+                try {
+                    // Check if domain already has a policy
+                    const isOnboarded = await isDomainOnboarded(domain, address);
+
+                    if (!isOnboarded) {
+                        console.log(`Onboarding domain: ${domain}`);
+                        await onboardDomain(domain, address, {
+                            messagingEnabled: true,
+                            policy: {
+                                consentMode: 'auto_accept',
+                                feeMode: 'none',
+                            },
+                        });
+                        console.log(`Successfully onboarded: ${domain}`);
+                        setOnboardingStatus(prev => ({
+                            ...prev,
+                            completedDomains: [...prev.completedDomains, domain],
+                        }));
+                    } else {
+                        console.log(`Domain already onboarded: ${domain}`);
+                        setOnboardingStatus(prev => ({
+                            ...prev,
+                            completedDomains: [...prev.completedDomains, domain],
+                        }));
+                    }
+                } catch (err) {
+                    console.error(`Failed to onboard domain ${domain}:`, err);
+                    setOnboardingStatus(prev => ({
+                        ...prev,
+                        failedDomains: [...prev.failedDomains, domain],
+                    }));
+                }
+            }
+
+            setOnboardingStatus(prev => ({ ...prev, isOnboarding: false, currentDomain: null }));
+        };
+
+        onboardDomains();
+    }, [isConnected, address, domains]);
 
     // Cleanup stream on unmount
     useEffect(() => {
@@ -210,6 +275,23 @@ export const Chat = () => {
                         ))}
                     </select>
                 </div>
+
+                {/* Onboarding Status */}
+                {onboardingStatus.isOnboarding && (
+                    <div className="p-3 bg-blue-900/30 border-b border-gray-700">
+                        <div className="flex items-center gap-2 text-sm text-blue-300">
+                            <div className="animate-spin h-4 w-4 border-2 border-blue-400 border-t-transparent rounded-full"></div>
+                            <span>Setting up {onboardingStatus.currentDomain}...</span>
+                        </div>
+                    </div>
+                )}
+                {!onboardingStatus.isOnboarding && onboardingStatus.failedDomains.length > 0 && (
+                    <div className="p-3 bg-red-900/30 border-b border-gray-700">
+                        <div className="text-xs text-red-300">
+                            Failed to setup: {onboardingStatus.failedDomains.join(', ')}
+                        </div>
+                    </div>
+                )}
 
                 {/* New Chat */}
                 <div className="p-4 border-b border-gray-700 space-y-2">

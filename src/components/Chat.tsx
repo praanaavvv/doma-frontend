@@ -92,6 +92,16 @@ export const Chat = () => {
         };
     }, []);
 
+    // Reset chat state when switching domains
+    useEffect(() => {
+        if (streamRef.current?.end) {
+            streamRef.current.end();
+        }
+        setConversation(null);
+        setMessages([]);
+        setNewMessage('');
+    }, [selectedDomain]);
+
     const joinConversation = useCallback(async (convId: string) => {
         if (!client || !convId) return;
 

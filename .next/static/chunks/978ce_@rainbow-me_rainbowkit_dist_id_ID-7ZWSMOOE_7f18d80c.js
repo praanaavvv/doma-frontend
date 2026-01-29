@@ -1,0 +1,7 @@
+(globalThis.TURBOPACK_CHUNK_LISTS || (globalThis.TURBOPACK_CHUNK_LISTS = [])).push({
+    script: typeof document === "object" ? document.currentScript : undefined,
+    chunks: [
+  "static/chunks/978ce_@rainbow-me_rainbowkit_dist_id_ID-7ZWSMOOE_295fca21.js"
+],
+    source: "dynamic"
+});

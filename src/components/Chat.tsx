@@ -25,6 +25,7 @@ export const Chat = () => {
     }>({ isOnboarding: false, currentDomain: null, completedDomains: [], failedDomains: [] });
     const streamRef = useRef<any>(null);
 
+
     // Auto-onboard domains after XMTP connects
     useEffect(() => {
         console.log('Onboarding effect check:', { isConnected, address, domainsLength: domains.length });
@@ -361,16 +362,19 @@ export const Chat = () => {
                 <div className="flex-1 overflow-y-auto p-4 space-y-4">
                     {messages
                         .filter((msg, index) => !(index === 0 && typeof msg.content !== 'string'))
-                        .map((msg) => (
-                            <div key={msg.id} className={`flex ${msg.senderInboxId === client?.inboxId ? 'justify-end' : 'justify-start'}`}>
-                                <div className={`max-w-[80%] px-4 py-2 rounded-2xl ${msg.senderInboxId === client?.inboxId
-                                    ? 'bg-blue-600 text-white rounded-br-none'
-                                    : 'bg-gray-700 text-gray-100 rounded-bl-none'
-                                    }`}>
-                                    <div>{typeof msg.content === 'string' ? msg.content : 'Unsupported content'}</div>
+                        .map((msg) => {
+                            console.log('Message object:', msg);
+                            return (
+                                <div key={msg.id} className={`flex ${msg.senderInboxId === client?.inboxId ? 'justify-end' : 'justify-start'}`}>
+                                    <div className={`max-w-[80%] px-4 py-2 rounded-2xl ${msg.senderInboxId === client?.inboxId
+                                        ? 'bg-blue-600 text-white rounded-br-none'
+                                        : 'bg-gray-700 text-gray-100 rounded-bl-none'
+                                        }`}>
+                                        <div>{typeof msg.content === 'string' ? msg.content : 'Unsupported content'}</div>
+                                    </div>
                                 </div>
-                            </div>
-                        ))}
+                            );
+                        })}
                     {messages.length === 0 && conversation && (
                         <div className="text-center text-gray-500 mt-10">Start chatting...</div>
                     )}

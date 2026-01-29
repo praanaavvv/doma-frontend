@@ -1,4 +1,4 @@
-const MESSAGING_API_BASE = 'http://localhost:8080/messaging';
+const MESSAGING_API_BASE = 'https://xmtp-messaging-domain.onrender.com/messaging';
 
 // Types
 export interface PolicyOptions {
@@ -101,7 +101,7 @@ export async function updateSubscription(
 }
 
 // Policy API - uses /policies endpoint
-const POLICIES_API_BASE = 'http://localhost:8080/policies';
+const POLICIES_API_BASE = 'https://xmtp-messaging-domain.onrender.com/policies';
 
 export interface DomainPolicy extends PolicyOptions {
     ownerWallet?: string;

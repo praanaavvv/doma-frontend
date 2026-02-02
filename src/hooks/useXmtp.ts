@@ -39,17 +39,10 @@ export const useXmtp = () => {
                 },
             };
 
-            // Generate a stable encryption key from address (for persistence)
-            const encoder = new TextEncoder();
-            const keyData = encoder.encode(address.toLowerCase().padEnd(32, '0'));
-            const dbEncryptionKey = keyData.slice(0, 32);
-
             try {
-                console.log('Calling Client.create with persistent db...');
+                console.log('Calling Client.create...');
                 const xmtpClient = await Client.create(xmtpSigner, {
                     env: 'dev',
-                    dbPath: `xmtp-${address.toLowerCase()}`, // Persist using wallet address
-                    dbEncryptionKey: dbEncryptionKey,
                 });
                 console.log('Client created!', xmtpClient.accountIdentifier);
                 setClient(xmtpClient);
@@ -100,8 +93,6 @@ export const useXmtp = () => {
                         // Retry creation after revocation
                         const newClient = await Client.create(xmtpSigner, {
                             env: 'dev',
-                            dbPath: `xmtp-${address.toLowerCase()}`,
-                            dbEncryptionKey: dbEncryptionKey,
                         });
                         console.log('Client created after revocation!');
                         setClient(newClient);
@@ -121,79 +112,11 @@ export const useXmtp = () => {
         }
     }, [walletClient, address]);
 
-    // Manual function to revoke excess installations (call this if InboxValidationFailed errors occur)
-    const revokeExcessInstallations = useCallback(async () => {
-        if (!client || !walletClient || !address) {
-            console.error('Client not initialized');
-            return;
-        }
-
-        try {
-            setIsLoading(true);
-            console.log('Fetching inbox state...');
-
-            const inboxId = client.inboxId;
-            if (!inboxId) {
-                console.error('No inbox ID found');
-                return;
-            }
-            const states = await Client.fetchInboxStates([inboxId], 'dev');
-
-            if (states.length === 0) {
-                console.error('Could not fetch inbox state');
-                return;
-            }
-
-            const installations = states[0].installations;
-            console.log('Found', installations.length, 'installations');
-
-            // Keep only first 2, revoke the rest
-            if (installations.length > 2) {
-                const installationsToRevoke = installations.slice(2);
-                console.log('Revoking', installationsToRevoke.length, 'excess installations...');
-
-                const xmtpSigner: Signer = {
-                    type: 'EOA',
-                    getIdentifier: () => Promise.resolve({
-                        identifier: address,
-                        identifierKind: IdentifierKind.Ethereum,
-                    }),
-                    signMessage: async (message: string) => {
-                        const signature = await walletClient.signMessage({ message });
-                        return hexToBytes(signature);
-                    },
-                };
-
-                for (const installation of installationsToRevoke) {
-                    console.log('Revoking installation:', installation.id);
-                    await Client.revokeInstallations(
-                        xmtpSigner,
-                        states[0].inboxId,
-                        [installation.bytes],
-                        'dev'
-                    );
-                }
-
-                console.log('Revocation complete! Please refresh the page.');
-                alert('Revoked ' + installationsToRevoke.length + ' installations. Please refresh the page.');
-            } else {
-                console.log('No excess installations to revoke');
-                alert('No excess installations to revoke (' + installations.length + ' current)');
-            }
-        } catch (err) {
-            console.error('Error revoking installations:', err);
-            setError(err as Error);
-        } finally {
-            setIsLoading(false);
-        }
-    }, [client, walletClient, address]);
-
     return {
         client,
         isLoading,
         error,
         initXmtp,
-        revokeExcessInstallations,
         isConnected: !!client,
     };
 };

@@ -3,12 +3,14 @@ import { useXmtp } from '../hooks/useXmtp';
 import { useDomains } from '../hooks/useDomains';
 import { useAccount } from 'wagmi';
 import { DecodedMessage, IdentifierKind } from '@xmtp/browser-sdk';
-import { getOwnerByDomain, syncConversation } from '../api/domaApi';
+import { getOwnerByDomain, syncConversation, getGroupConversations, getGroupConversationMembers, upsertDomainGroupConversation, type GroupConversation, type GroupMember } from '../api/domaApi';
 import { isDomainOnboarded, onboardDomain } from '../api/messagingApi';
+
+type TabType = 'contacts' | 'groups';
 
 export const Chat = () => {
     const { address } = useAccount();
-    const { client, initXmtp, isConnected, isLoading, error } = useXmtp();
+    const { client, initXmtp, isConnected, isLoading, error, revokeExcessInstallations } = useXmtp();
     const { domains, selectedDomain, setSelectedDomain, conversations, refreshConversations } = useDomains(address);
 
     const [messages, setMessages] = useState<DecodedMessage[]>([]);
@@ -25,17 +27,73 @@ export const Chat = () => {
     }>({ isOnboarding: false, currentDomain: null, completedDomains: [], failedDomains: [] });
     const streamRef = useRef<any>(null);
 
+    // Tab state
+    const [activeTab, setActiveTab] = useState<TabType>('contacts');
+
+    // Group state
+    const [groupConversations, setGroupConversations] = useState<GroupConversation[]>([]);
+    const [selectedGroupMembers, setSelectedGroupMembers] = useState<GroupMember[]>([]);
+    const [isCreatingGroup, setIsCreatingGroup] = useState(false);
+    const [newGroupName, setNewGroupName] = useState('');
+    const [addMemberDomain, setAddMemberDomain] = useState('');
+    const [isAddingMember, setIsAddingMember] = useState(false);
+    const [showAddMemberModal, setShowAddMemberModal] = useState(false);
+    const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null); // Track group ID independently of XMTP
+    const [inboxToDomain, setInboxToDomain] = useState<Map<string, string>>(new Map()); // Map inboxId/wallet to domain
+
+    // Fetch group conversations when domain changes
+    useEffect(() => {
+        if (!selectedDomain || !isConnected) return;
+
+        const fetchGroups = async () => {
+            try {
+                const response = await getGroupConversations(selectedDomain);
+                setGroupConversations(response || []);
+            } catch (e) {
+                console.error('Failed to fetch group conversations:', e);
+                setGroupConversations([]);
+            }
+        };
+
+        fetchGroups();
+    }, [selectedDomain, isConnected]);
+
+    // Fetch group members when a group is selected (uses backend, not XMTP)
+    useEffect(() => {
+        if (!selectedGroupId || activeTab !== 'groups') return;
+
+        const fetchMembers = async () => {
+            try {
+                const response = await getGroupConversationMembers(selectedGroupId);
+                const members = response.members || [];
+                setSelectedGroupMembers(members);
+
+                // Build inboxId/wallet -> domain mapping for group members
+                const newMapping = new Map<string, string>();
+                for (const member of members) {
+                    try {
+                        const ownerRes = await getOwnerByDomain(member.domain);
+                        const wallet = ownerRes.owner.toLowerCase();
+                        newMapping.set(wallet, member.domain);
+                        // Also try setting with various formats
+                        newMapping.set(ownerRes.owner, member.domain);
+                    } catch (e) {
+                        console.warn(`Failed to get owner for ${member.domain}:`, e);
+                    }
+                }
+                setInboxToDomain(newMapping);
+            } catch (e) {
+                console.error('Failed to fetch group members:', e);
+                setSelectedGroupMembers([]);
+            }
+        };
+
+        fetchMembers();
+    }, [selectedGroupId, activeTab]);
 
     // Auto-onboard domains after XMTP connects
     useEffect(() => {
-        console.log('Onboarding effect check:', { isConnected, address, domainsLength: domains.length });
-
-        if (!isConnected || !address || domains.length === 0) {
-            console.log('Onboarding skipped - conditions not met');
-            return;
-        }
-
-        console.log('Starting auto-onboarding for domains:', domains.map(d => d.domain));
+        if (!isConnected || !address || domains.length === 0) return;
 
         const onboardDomains = async () => {
             setOnboardingStatus(prev => ({ ...prev, isOnboarding: true }));
@@ -45,25 +103,18 @@ export const Chat = () => {
                 setOnboardingStatus(prev => ({ ...prev, currentDomain: domain }));
 
                 try {
-                    // Check if domain already has a policy
                     const isOnboarded = await isDomainOnboarded(domain, address);
 
                     if (!isOnboarded) {
-                        console.log(`Onboarding domain: ${domain}`);
                         await onboardDomain(domain, address, {
                             messagingEnabled: true,
-                            policy: {
-                                consentMode: 'auto_accept',
-                                feeMode: 'none',
-                            },
+                            policy: { consentMode: 'auto_accept', feeMode: 'none' },
                         });
-                        console.log(`Successfully onboarded: ${domain}`);
                         setOnboardingStatus(prev => ({
                             ...prev,
                             completedDomains: [...prev.completedDomains, domain],
                         }));
                     } else {
-                        console.log(`Domain already onboarded: ${domain}`);
                         setOnboardingStatus(prev => ({
                             ...prev,
                             completedDomains: [...prev.completedDomains, domain],
@@ -103,29 +154,47 @@ export const Chat = () => {
         setNewMessage('');
     }, [selectedDomain]);
 
-    const joinConversation = useCallback(async (convId: string) => {
+    const joinConversation = useCallback(async (convId: string, isGroup: boolean = false) => {
         if (!client || !convId) return;
+
+        // Always set the group ID for backend member lookup (works even if XMTP fails)
+        if (isGroup) {
+            setSelectedGroupId(convId);
+        }
 
         try {
             if (streamRef.current?.end) {
                 streamRef.current.end();
             }
 
-            console.log('Joining conversation:', convId);
-            await client.conversations.sync();
+            // Sync may fail due to XMTP inbox issues, but we can still try to get the conversation
+            try {
+                await client.conversations.sync();
+            } catch (syncErr) {
+                console.warn('Conversations sync failed, continuing anyway:', syncErr);
+            }
 
             const conv = await client.conversations.getConversationById(convId);
             if (!conv) {
-                console.error('Conversation not found');
+                console.warn('XMTP conversation not found - showing group info from backend only');
+                setConversation(null);
+                setMessages([]);
+                // Group info will still show from backend via selectedGroupId
                 return;
             }
 
             setConversation(conv);
-            await conv.sync();
+
+            // Conversation sync may also fail, but we can still try to get messages
+            try {
+                await conv.sync();
+            } catch (convSyncErr) {
+                console.warn('Conversation sync failed, continuing anyway:', convSyncErr);
+            }
+
             const msgs = await conv.messages();
             setMessages(msgs);
 
-            // Start streaming
             const stream = await conv.stream();
             streamRef.current = stream;
 
@@ -143,6 +212,11 @@ export const Chat = () => {
             })();
         } catch (e) {
             console.error('Error joining conversation:', e);
+            // Still show group info from backend
+            if (isGroup) {
+                setConversation(null);
+                setMessages([]);
+            }
         }
     }, [client]);
 
@@ -151,14 +225,10 @@ export const Chat = () => {
 
         try {
             setIsStartingChat(true);
-            console.log('Starting chat with domain:', recipientDomain);
 
-            // Get wallet address for recipient domain
             const ownerResponse = await getOwnerByDomain(recipientDomain);
             const recipientAddress = ownerResponse.owner;
-            console.log('Recipient address:', recipientAddress);
 
-            // Check if on XMTP
             const identifier = { identifier: recipientAddress, identifierKind: IdentifierKind.Ethereum };
             const canMessageMap = await client.canMessage([identifier]);
             const canMessage = canMessageMap.get(identifier.identifier.toLowerCase()) || canMessageMap.get(identifier.identifier);
@@ -168,40 +238,28 @@ export const Chat = () => {
                 return;
             }
 
-            // Sync conversations
             await client.conversations.sync();
 
-            // Create a unique group name for this domain pair (sorted for consistency)
             const domainPair = [selectedDomain, recipientDomain].sort().join(':');
             const groupName = `doma:${domainPair}`;
 
-            // Check if a group with this domain pair already exists
             const allConversations = await client.conversations.list();
-            // Filter for groups only (DMs don't have names) and find by group name
             let conv = allConversations.find(c => 'name' in c && c.name === groupName);
 
             if (!conv) {
-                // Create a new group for this domain pair
-                console.log('Creating new group for domain pair:', groupName);
                 conv = await client.conversations.createGroupWithIdentifiers([identifier], {
                     groupName: groupName,
                     groupDescription: `Chat between ${selectedDomain} and ${recipientDomain}`,
                 });
-            } else {
-                console.log('Found existing group for domain pair:', groupName);
             }
 
-            // Sync to backend
             await syncConversation({
                 id: conv.id,
                 senderDomain: selectedDomain,
                 recipientDomain: recipientDomain,
             });
 
-            // Refresh conversations list
             await refreshConversations();
-
-            // Join the conversation
             await joinConversation(conv.id);
             setRecipientDomain('');
         } catch (e) {
@@ -211,6 +269,118 @@ export const Chat = () => {
             setIsStartingChat(false);
         }
     }, [client, selectedDomain, recipientDomain, joinConversation, refreshConversations]);
+
+    const createGroup = useCallback(async () => {
+        if (!client || !selectedDomain || !newGroupName) return;
+
+        try {
+            setIsCreatingGroup(true);
+
+            // Use the group name as the display name
+            const groupName = newGroupName;
+
+            // Create OPTIMISTIC group - stays local until members are added
+            // This avoids the InboxValidationFailed sync issues
+            console.log('Creating optimistic XMTP group...');
+            const conv = await client.conversations.createGroupOptimistic({
+                groupName: groupName,
+                groupDescription: `Group: ${newGroupName}`,
+            });
+            console.log('Created optimistic XMTP group with ID:', conv.id);
+
+            // Register creator's domain in backend with the conversation ID
+            console.log('Registering with backend...');
+            try {
+                await upsertDomainGroupConversation(selectedDomain, conv.id);
+                console.log('Backend registration complete');
+            } catch (backendErr) {
+                console.error('Backend registration failed:', backendErr);
+            }
+
+            // Refresh group list
+            console.log('Refreshing group list...');
+            try {
+                const response = await getGroupConversations(selectedDomain);
+                setGroupConversations(response || []);
+            } catch (fetchErr) {
+                console.error('Failed to refresh groups:', fetchErr);
+            }
+
+            setNewGroupName('');
+
+            // Set this as the current conversation (no sync needed for optimistic group)
+            setConversation(conv);
+            setSelectedGroupId(conv.id);
+            setMessages([]);
+            console.log('Group creation complete! Add members to sync to network.');
+        } catch (e) {
+            console.error('Error creating group:', e);
+            alert('Failed to create group. Check console for details.');
+        } finally {
+            setIsCreatingGroup(false);
+        }
+    }, [client, selectedDomain, newGroupName]);
+
+    const addMemberToGroup = useCallback(async () => {
+        if (!client || !selectedGroupId || !addMemberDomain) return;
+
+        try {
+            setIsAddingMember(true);
+
+            // Get wallet address for the domain
+            const ownerResponse = await getOwnerByDomain(addMemberDomain);
+            const memberAddress = ownerResponse.owner;
+
+            // Check if they're on XMTP
+            const identifier = { identifier: memberAddress, identifierKind: IdentifierKind.Ethereum };
+            const canMessageMap = await client.canMessage([identifier]);
+            const canMessage = canMessageMap.get(identifier.identifier.toLowerCase()) || canMessageMap.get(identifier.identifier);
+
+            if (!canMessage) {
+                alert(`${addMemberDomain} is not registered on XMTP yet.`);
+                return;
+            }
+
+            // Try to add to XMTP group (may fail due to InboxValidationFailed)
+            let xmtpSuccess = false;
+            if (conversation) {
+                try {
+                    await conversation.addMembersByIdentifiers([identifier]);
+                    xmtpSuccess = true;
+                    console.log('XMTP member added successfully');
+                } catch (xmtpErr) {
+                    console.warn('XMTP addMember failed (InboxValidationFailed), continuing with backend registration:', xmtpErr);
+                    // Continue anyway - we'll still register in backend
+                }
+            } else {
+                console.log('No XMTP conversation - registering in backend only');
+            }
+
+            // ALWAYS register in backend (this is what matters for your group management)
+            await upsertDomainGroupConversation(addMemberDomain, selectedGroupId);
+            console.log('Backend registration complete for:', addMemberDomain);
+
+            // Refresh members from backend
+            try {
+                const response = await getGroupConversationMembers(selectedGroupId);
+                setSelectedGroupMembers(response.members || []);
+            } catch (fetchErr) {
+                console.warn('Failed to refresh members list:', fetchErr);
+            }
+
+            setAddMemberDomain('');
+            setShowAddMemberModal(false);
+
+            if (!xmtpSuccess) {
+                alert(`Member ${addMemberDomain} added to group database. Note: XMTP sync had issues - they may need to refresh to see messages.`);
+            }
+        } catch (e) {
+            console.error('Error adding member:', e);
+            alert('Failed to add member. Check console for details.');
+        } finally {
+            setIsAddingMember(false);
+        }
+    }, [client, conversation, selectedGroupId, addMemberDomain]);
 
     // Check recipient domain status
     useEffect(() => {
@@ -303,77 +473,199 @@ export const Chat = () => {
                     </div>
                 )}
 
-                {/* New Chat */}
-                <div className="p-4 border-b border-gray-700 space-y-2">
-                    <div className="text-xs text-gray-400">Chat with Domain</div>
-                    <div className="flex gap-2">
-                        <input
-                            type="text"
-                            placeholder="Enter domain..."
-                            value={recipientDomain}
-                            onChange={(e) => setRecipientDomain(e.target.value)}
-                            className={`flex-1 bg-gray-700 text-white px-3 py-2 rounded-lg text-sm focus:outline-none focus:ring-2 ${recipientStatus === 'valid' ? 'focus:ring-green-500 ring-1 ring-green-500/50' :
-                                recipientStatus === 'invalid' ? 'focus:ring-red-500 ring-1 ring-red-500/50' :
-                                    'focus:ring-blue-500'
-                                }`}
-                        />
-                    </div>
+                {/* Revoke Installations Button - shows if there are XMTP issues */}
+                <div className="p-2 border-b border-gray-700">
                     <button
-                        onClick={startNewChat}
-                        disabled={!recipientDomain || isStartingChat || recipientStatus !== 'valid'}
-                        className="w-full px-3 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:bg-gray-600 rounded-lg text-white text-sm font-semibold"
+                        onClick={revokeExcessInstallations}
+                        disabled={isLoading}
+                        className="w-full px-3 py-2 bg-orange-600/30 hover:bg-orange-600/50 text-orange-300 text-xs rounded transition-all disabled:opacity-50"
+                        title="Click if you see InboxValidationFailed errors"
                     >
-                        {isStartingChat ? 'Starting...' : 'Start Chat'}
+                        🔧 Fix XMTP Issues
                     </button>
                 </div>
 
-                {/* Conversations */}
-                <div className="flex-1 overflow-y-auto">
-                    <div className="p-2 text-xs text-gray-400 uppercase tracking-wider">Conversations</div>
-                    {conversations.length === 0 ? (
-                        <div className="px-4 py-2 text-gray-500 text-sm">No conversations yet</div>
-                    ) : (
-                        conversations.map(c => (
-                            <button
-                                key={c.conversationId}
-                                onClick={() => joinConversation(c.conversationId)}
-                                className={`w-full px-4 py-3 text-left hover:bg-gray-700/50 transition-all ${conversation?.id === c.conversationId ? 'bg-blue-600/20 border-l-2 border-blue-500' : ''
-                                    }`}
-                            >
-                                <div className="text-white text-sm font-medium">{c.withDomain}</div>
-                                <div className="text-gray-400 text-xs">{new Date(c.createdAt).toLocaleDateString()}</div>
-                            </button>
-                        ))
-                    )}
+                {/* Tabs */}
+                <div className="flex border-b border-gray-700">
+                    <button
+                        onClick={() => setActiveTab('contacts')}
+                        className={`flex-1 py-3 text-sm font-medium transition-all ${activeTab === 'contacts'
+                            ? 'text-blue-400 border-b-2 border-blue-400 bg-gray-700/30'
+                            : 'text-gray-400 hover:text-gray-200'
+                            }`}
+                    >
+                        Contacts
+                    </button>
+                    <button
+                        onClick={() => setActiveTab('groups')}
+                        className={`flex-1 py-3 text-sm font-medium transition-all ${activeTab === 'groups'
+                            ? 'text-emerald-400 border-b-2 border-emerald-400 bg-gray-700/30'
+                            : 'text-gray-400 hover:text-gray-200'
+                            }`}
+                    >
+                        Groups
+                    </button>
                 </div>
+
+                {/* Tab Content */}
+                {activeTab === 'contacts' ? (
+                    <>
+                        {/* New Chat */}
+                        <div className="p-4 border-b border-gray-700 space-y-2">
+                            <div className="text-xs text-gray-400">Chat with Domain</div>
+                            <input
+                                type="text"
+                                placeholder="Enter domain..."
+                                value={recipientDomain}
+                                onChange={(e) => setRecipientDomain(e.target.value)}
+                                className={`w-full bg-gray-700 text-white px-3 py-2 rounded-lg text-sm focus:outline-none focus:ring-2 ${recipientStatus === 'valid' ? 'focus:ring-green-500 ring-1 ring-green-500/50' :
+                                    recipientStatus === 'invalid' ? 'focus:ring-red-500 ring-1 ring-red-500/50' :
+                                        'focus:ring-blue-500'
+                                    }`}
+                            />
+                            <button
+                                onClick={startNewChat}
+                                disabled={!recipientDomain || isStartingChat || recipientStatus !== 'valid'}
+                                className="w-full px-3 py-2 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-600 rounded-lg text-white text-sm font-semibold"
+                            >
+                                {isStartingChat ? 'Starting...' : 'Start Chat'}
+                            </button>
+                        </div>
+
+                        {/* Contacts List */}
+                        <div className="flex-1 overflow-y-auto">
+                            <div className="p-2 text-xs text-gray-400 uppercase tracking-wider">Conversations</div>
+                            {conversations.length === 0 ? (
+                                <div className="px-4 py-2 text-gray-500 text-sm">No conversations yet</div>
+                            ) : (
+                                conversations.map(c => (
+                                    <button
+                                        key={c.conversationId}
+                                        onClick={() => joinConversation(c.conversationId)}
+                                        className={`w-full px-4 py-3 text-left hover:bg-gray-700/50 transition-all ${conversation?.id === c.conversationId ? 'bg-blue-600/20 border-l-2 border-blue-500' : ''
+                                            }`}
+                                    >
+                                        <div className="text-white text-sm font-medium">{c.withDomain}</div>
+                                        <div className="text-gray-400 text-xs">{new Date(c.createdAt).toLocaleDateString()}</div>
+                                    </button>
+                                ))
+                            )}
+                        </div>
+                    </>
+                ) : (
+                    <>
+                        {/* Create Group */}
+                        <div className="p-4 border-b border-gray-700 space-y-2">
+                            <div className="text-xs text-gray-400">Create New Group</div>
+                            <input
+                                type="text"
+                                placeholder="Group name..."
+                                value={newGroupName}
+                                onChange={(e) => setNewGroupName(e.target.value)}
+                                className="w-full bg-gray-700 text-white px-3 py-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                            />
+                            <button
+                                onClick={createGroup}
+                                disabled={!newGroupName || isCreatingGroup}
+                                className="w-full px-3 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:bg-gray-600 rounded-lg text-white text-sm font-semibold"
+                            >
+                                {isCreatingGroup ? 'Creating...' : 'Create Group'}
+                            </button>
+                        </div>
+
+                        {/* Groups List */}
+                        <div className="flex-1 overflow-y-auto">
+                            <div className="p-2 text-xs text-gray-400 uppercase tracking-wider">Groups</div>
+                            {groupConversations.length === 0 ? (
+                                <div className="px-4 py-2 text-gray-500 text-sm">No groups yet</div>
+                            ) : (
+                                groupConversations.map(g => (
+                                    <button
+                                        key={g.conversationId}
+                                        onClick={() => joinConversation(g.conversationId, true)}
+                                        className={`w-full px-4 py-3 text-left hover:bg-gray-700/50 transition-all ${selectedGroupId === g.conversationId ? 'bg-emerald-600/20 border-l-2 border-emerald-500' : ''
+                                            }`}
+                                    >
+                                        <div className="text-white text-sm font-medium">{g.name || g.conversationId}</div>
+                                        <div className="text-gray-400 text-xs">{new Date(g.createdAt).toLocaleDateString()}</div>
+                                    </button>
+                                ))
+                            )}
+                        </div>
+                    </>
+                )}
             </div>
 
             {/* Chat Area */}
             <div className="flex-1 flex flex-col">
                 {/* Chat Header */}
-                <div className="px-4 py-3 bg-gray-800/50 border-b border-gray-700">
+                <div className="px-4 py-3 bg-gray-800/50 border-b border-gray-700 flex justify-between items-center">
                     <div className="text-white font-semibold">
-                        {conversation ? (conversations.find(c => c.conversationId === conversation.id)?.withDomain || 'Chat') : 'Select a conversation'}
+                        {activeTab === 'groups' && selectedGroupId ? (
+                            groupConversations.find(g => g.conversationId === selectedGroupId)?.name || 'Group Chat'
+                        ) : conversation ? (
+                            conversations.find(c => c.conversationId === conversation.id)?.withDomain || 'Chat'
+                        ) : 'Select a conversation'}
                     </div>
+                    {selectedGroupId && activeTab === 'groups' && (
+                        <button
+                            onClick={() => setShowAddMemberModal(true)}
+                            className="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 rounded text-white text-sm"
+                        >
+                            + Add Member
+                        </button>
+                    )}
                 </div>
+
+                {/* Group Members (shown for groups - from backend, not XMTP) */}
+                {selectedGroupId && activeTab === 'groups' && selectedGroupMembers.length > 0 && (
+                    <div className="px-4 py-2 bg-gray-800/30 border-b border-gray-700 flex gap-2 flex-wrap">
+                        <span className="text-xs text-gray-400">Members:</span>
+                        {selectedGroupMembers.map(m => (
+                            <span key={m.domain} className="text-xs bg-gray-700 text-gray-200 px-2 py-1 rounded">
+                                {m.domain}
+                            </span>
+                        ))}
+                    </div>
+                )}
+
+                {/* XMTP sync status warning */}
+                {selectedGroupId && activeTab === 'groups' && !conversation && (
+                    <div className="px-4 py-2 bg-yellow-900/30 border-b border-gray-700">
+                        <div className="text-xs text-yellow-300">
+                            ⚠️ XMTP sync pending - Group info shown from database. Messages may not appear yet.
+                        </div>
+                    </div>
+                )}
 
                 {/* Messages */}
                 <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                    {messages.map((msg) => {
+                        const isOwnMessage = msg.senderInboxId === client?.inboxId;
+                        // Try to find sender domain from our mapping (try various formats)
+                        const senderDomain = inboxToDomain.get(msg.senderInboxId)
+                            || inboxToDomain.get(msg.senderInboxId?.toLowerCase())
+                            || null;
 
-                    {messages
-                        .filter((msg, index) => !(index === 0 && typeof msg.content !== 'string'))
-                        .map((msg) => {
-                            return (
-                                <div key={msg.id} className={`flex ${msg.senderInboxId === client?.inboxId ? 'justify-end' : 'justify-start'}`}>
-                                    <div className={`max-w-[80%] px-4 py-2 rounded-2xl ${msg.senderInboxId === client?.inboxId
+                        return (
+                            <div key={msg.id} className={`flex ${isOwnMessage ? 'justify-end' : 'justify-start'}`}>
+                                <div className={`max-w-[80%] ${isOwnMessage ? '' : 'flex flex-col'}`}>
+                                    {/* Show sender domain for group messages (not own messages) */}
+                                    {!isOwnMessage && activeTab === 'groups' && (
+                                        <div className="text-xs text-emerald-400 mb-1 ml-1">
+                                            {senderDomain || msg.senderInboxId?.slice(0, 8) + '...'}
+                                        </div>
+                                    )}
+                                    <div className={`px-4 py-2 rounded-2xl ${isOwnMessage
                                         ? 'bg-blue-600 text-white rounded-br-none'
                                         : 'bg-gray-700 text-gray-100 rounded-bl-none'
                                         }`}>
                                         <div>{typeof msg.content === 'string' ? msg.content : 'Unsupported content'}</div>
                                     </div>
                                 </div>
-                            );
-                        })}
+                            </div>
+                        );
+                    })}
                     {messages.length === 0 && conversation && (
                         <div className="text-center text-gray-500 mt-10">Start chatting...</div>
                     )}
@@ -402,6 +694,37 @@ export const Chat = () => {
                     </button>
                 </div>
             </div>
+
+            {/* Add Member Modal */}
+            {showAddMemberModal && (
+                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+                    <div className="bg-gray-800 rounded-xl p-6 w-96 border border-gray-700">
+                        <h3 className="text-lg font-semibold text-white mb-4">Add Member to Group</h3>
+                        <input
+                            type="text"
+                            placeholder="Enter domain..."
+                            value={addMemberDomain}
+                            onChange={(e) => setAddMemberDomain(e.target.value)}
+                            className="w-full bg-gray-700 text-white px-3 py-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 mb-4"
+                        />
+                        <div className="flex gap-2">
+                            <button
+                                onClick={() => setShowAddMemberModal(false)}
+                                className="flex-1 px-4 py-2 bg-gray-600 hover:bg-gray-500 rounded-lg text-white text-sm"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={addMemberToGroup}
+                                disabled={!addMemberDomain || isAddingMember}
+                                className="flex-1 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:bg-gray-600 rounded-lg text-white text-sm font-semibold"
+                            >
+                                {isAddingMember ? 'Adding...' : 'Add'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 };

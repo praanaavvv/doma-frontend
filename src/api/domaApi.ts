@@ -72,3 +72,48 @@ export async function syncConversation(payload: SyncConversationPayload): Promis
     if (!res.ok) throw new Error('Failed to sync conversation');
     return res.json();
 }
+
+// Group Conversation Types
+export interface GroupConversation {
+    conversationId: string;
+    withDomain: string;  // The domain that this group conversation is associated with
+    name?: string;
+    createdAt: string;
+}
+
+export interface GroupConversationsResponse {
+    domain: string;
+    conversations: GroupConversation[];
+}
+
+export interface GroupMember {
+    domain: string;
+    addedAt: string;
+}
+
+export interface GroupMembersResponse {
+    conversationId: string;
+    members: GroupMember[];
+}
+
+// Group Conversation API Functions
+export async function getGroupConversations(domain: string): Promise<GroupConversation[]> {
+    const res = await fetch(`${API_BASE}/group-conversations?domain=${encodeURIComponent(domain)}`);
+    if (!res.ok) throw new Error('Failed to fetch group conversations');
+    return res.json();
+}
+
+export async function getGroupConversationMembers(conversationId: string): Promise<GroupMembersResponse> {
+    const res = await fetch(`${API_BASE}/group-conversations/members?conversationId=${encodeURIComponent(conversationId)}`);
+    if (!res.ok) throw new Error('Failed to fetch group members');
+    return res.json();
+}
+
+export async function upsertDomainGroupConversation(domain: string, conversationId: string): Promise<void> {
+    const res = await fetch(`${API_BASE}/group-conversations`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ domain, conversationId }),
+    });
+    if (!res.ok) throw new Error('Failed to add domain to group');
+}

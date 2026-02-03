@@ -1,4 +1,4 @@
-const API_BASE = 'http://localhost:8080/domains';
+const API_BASE = 'https://xmtp-messaging-domain.onrender.com';
 
 // Types
 export interface DomainInfo {

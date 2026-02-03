@@ -1,11 +1,12 @@
 import { useState, useEffect, useCallback } from 'react';
-import { getDomainsForOwner, getConversationsForDomain } from '../api/domaApi';
-import type { DomainInfo, Conversation } from '../api/domaApi';
+import { getDomainsForOwner, getConversationsForDomain, getGroupConversations } from '../api/domaApi';
+import type { DomainInfo, Conversation, GroupConversation } from '../api/domaApi';
 
 export const useDomains = (walletAddress: string | undefined) => {
     const [domains, setDomains] = useState<DomainInfo[]>([]);
     const [selectedDomain, setSelectedDomain] = useState<string | null>(null);
     const [conversations, setConversations] = useState<Conversation[]>([]);
+    const [groupConversations, setGroupConversations] = useState<GroupConversation[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState<Error | null>(null);
 
@@ -14,6 +15,8 @@ export const useDomains = (walletAddress: string | undefined) => {
         if (!walletAddress) {
             setDomains([]);
             setSelectedDomain(null);
+            setConversations([]);
+            setGroupConversations([]);
             return;
         }
 
@@ -50,6 +53,8 @@ export const useDomains = (walletAddress: string | undefined) => {
             try {
                 const response = await getConversationsForDomain(selectedDomain);
                 setConversations(response.conversations);
+                const groups = await getGroupConversations(selectedDomain);
+                setGroupConversations(groups);
             } catch (e) {
                 console.error('Failed to fetch conversations:', e);
             }
@@ -63,6 +68,8 @@ export const useDomains = (walletAddress: string | undefined) => {
         try {
             const response = await getConversationsForDomain(selectedDomain);
             setConversations(response.conversations);
+            const groups = await getGroupConversations(selectedDomain);
+            setGroupConversations(groups);
         } catch (e) {
             console.error('Failed to refresh conversations:', e);
         }
@@ -73,6 +80,7 @@ export const useDomains = (walletAddress: string | undefined) => {
         selectedDomain,
         setSelectedDomain,
         conversations,
+        groupConversations,
         isLoading,
         error,
         refreshConversations,

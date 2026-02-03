@@ -1,4 +1,4 @@
-const API_BASE = 'https://xmtp-messaging-domain.onrender.com/domains';
+const API_BASE = 'http://localhost:8080/domains';
 
 // Types
 export interface DomainInfo {
@@ -32,6 +32,16 @@ export interface Conversation {
 export interface ConversationsResponse {
     domain: string;
     conversations: Conversation[];
+}
+
+export interface GroupConversation {
+    conversationId: string;
+    withDomain: string;
+    createdAt: string;
+    metadata: {
+        admin: string | null;
+        name: string | null;
+    };
 }
 
 export interface OwnerResponse {
@@ -70,5 +80,26 @@ export async function syncConversation(payload: SyncConversationPayload): Promis
         body: JSON.stringify(payload),
     });
     if (!res.ok) throw new Error('Failed to sync conversation');
+    return res.json();
+}
+
+export async function upsertDomainGroupConversation(domain: string, conversationId: string): Promise<void> {
+    const res = await fetch(`${API_BASE}/group-conversations`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ domain, conversationId }),
+    });
+    if (!res.ok) throw new Error('Failed to upsert group conversation');
+}
+
+export async function getGroupConversations(domain: string): Promise<GroupConversation[]> {
+    const res = await fetch(`${API_BASE}/group-conversations?domain=${encodeURIComponent(domain)}`);
+    if (!res.ok) throw new Error('Failed to fetch group conversations');
+    return res.json();
+}
+
+export async function getGroupConversationMembers(conversationId: string): Promise<string[]> {
+    const res = await fetch(`${API_BASE}/group-conversations/members?conversationId=${encodeURIComponent(conversationId)}`);
+    if (!res.ok) throw new Error('Failed to fetch group members');
     return res.json();
 }

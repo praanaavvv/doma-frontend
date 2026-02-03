@@ -83,11 +83,11 @@ export async function syncConversation(payload: SyncConversationPayload): Promis
     return res.json();
 }
 
-export async function upsertDomainGroupConversation(domain: string, conversationId: string): Promise<void> {
+export async function upsertDomainGroupConversation(domain: string, conversationId: string, groupName?: string): Promise<void> {
     const res = await fetch(`${API_BASE}/group-conversations`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ domain, conversationId }),
+        body: JSON.stringify({ domain, conversationId, groupName }),
     });
     if (!res.ok) throw new Error('Failed to upsert group conversation');
 }

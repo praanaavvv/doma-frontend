@@ -27,6 +27,7 @@ export const GroupChat = () => {
     // Chat State
     const [newMessage, setNewMessage] = useState('');
     const [currentMembers, setCurrentMembers] = useState<string[]>([]);
+    const [inboxIdToDomain, setInboxIdToDomain] = useState<Record<string, string>>({});
 
     const streamRef = useRef<any>(null);
 
@@ -137,7 +138,7 @@ export const GroupChat = () => {
             const allParticipants = [selectedDomain, ...selectedMembers];
 
             await Promise.all(allParticipants.map(domain =>
-                upsertDomainGroupConversation(domain, conv.id)
+                upsertDomainGroupConversation(domain, conv.id, newGroupName)
             ));
 
             setNewGroupName('');
@@ -173,17 +174,32 @@ export const GroupChat = () => {
             const msgs = await conv.messages();
             setMessages(msgs);
 
-            // Fetch members for display
+            // Fetch members for display and build inboxId -> domain mapping
             try {
-                // Use local API helper logic (we want domains)
-                // The API getGroupConversationMembers returns string[] (domains)
-                // But wait, the API just returns what is in DB.
-                // XMTP conversation members are addresses.
-                // We should rely on XMTP group members if possible, 
-                // but our app seems to want to show Domains.
-                // Let's try to fetch from our backend
-                const dbMembers = await getGroupConversationMembers(convId);
-                setCurrentMembers(dbMembers);
+                const dbMembersRaw = await getGroupConversationMembers(convId);
+                // API returns [{members: "domain"}, ...] format
+                const memberDomains = Array.isArray(dbMembersRaw)
+                    ? dbMembersRaw.map((m: any) => typeof m === 'string' ? m : m.members)
+                    : [];
+                setCurrentMembers(memberDomains);
+
+                // Build inboxId -> domain mapping
+                const mapping: Record<string, string> = {};
+                for (const domain of memberDomains) {
+                    try {
+                        const ownerRes = await getOwnerByDomain(domain);
+                        const inboxId = await getInboxIdForIdentifier({
+                            identifier: ownerRes.owner,
+                            identifierKind: IdentifierKind.Ethereum
+                        }, 'dev');
+                        if (inboxId) {
+                            mapping[inboxId] = domain;
+                        }
+                    } catch (e) {
+                        console.warn(`Failed to resolve inboxId for ${domain}`, e);
+                    }
+                }
+                setInboxIdToDomain(mapping);
             } catch (err) {
                 console.warn('Failed to fetch group members from DB', err);
             }
@@ -243,8 +259,9 @@ export const GroupChat = () => {
             // Add to XMTP Group
             await conversation.addMembers([inboxId]);
 
-            // Sync to backend
-            await upsertDomainGroupConversation(addMemberDomain, conversation.id);
+            // Sync to backend - get the group name from the conversation metadata
+            const groupName = groupConversations.find(g => g.conversationId === conversation.id)?.metadata.name;
+            await upsertDomainGroupConversation(addMemberDomain, conversation.id, groupName || undefined);
 
             setAddMemberDomain('');
             // Refresh member list?
@@ -395,14 +412,20 @@ export const GroupChat = () => {
                 </div>
 
                 <div className="flex-1 overflow-y-auto p-4 space-y-4">
-                    {messages.map((msg) => (
-                        <div key={msg.id} className={`flex ${msg.senderInboxId === client?.inboxId ? 'justify-end' : 'justify-start'}`}>
-                            <div className={`max-w-[80%] px-4 py-2 rounded-2xl ${msg.senderInboxId === client?.inboxId ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-100'}`}>
-                                <div className="text-xs opacity-50 mb-1">{msg.senderInboxId.slice(0, 6)}...</div>
-                                <div>{typeof msg.content === 'string' ? msg.content : 'Unsupported content'}</div>
+                    {messages
+                        .filter(msg => typeof msg.content === 'string')
+                        .map((msg) => (
+                            <div key={msg.id} className={`flex ${msg.senderInboxId === client?.inboxId ? 'justify-end' : 'justify-start'}`}>
+                                <div className={`max-w-[80%] px-4 py-2 rounded-2xl ${msg.senderInboxId === client?.inboxId ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-100'}`}>
+                                    <div className="text-xs opacity-50 mb-1">
+                                        {msg.senderInboxId === client?.inboxId
+                                            ? selectedDomain || 'You'
+                                            : inboxIdToDomain[msg.senderInboxId] || msg.senderInboxId.slice(0, 8) + '...'}
+                                    </div>
+                                    <div>{msg.content as string}</div>
+                                </div>
                             </div>
-                        </div>
-                    ))}
+                        ))}
                     {!conversation && <div className="text-center text-gray-500 mt-10">Select a group to start chatting</div>}
                 </div>
 
